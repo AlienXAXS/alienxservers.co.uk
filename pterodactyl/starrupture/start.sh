@@ -11,13 +11,16 @@ step() {
     sleep 1
 }
 
+echo "Starting server, please wait..."
 step "Installing required packages"
 # Install required packages (jq, unzip, curl). Pterodactyl containers may run
 # unprivileged, so tolerate failure - fallbacks below handle a missing jq.
-if apt-get update -qq 2>/dev/null && apt-get install -y -qq jq unzip curl ca-certificates 2>/dev/null; then
+APT_OUTPUT=$(apt-get update -qq 2>&1 && apt-get install -y -qq jq unzip curl ca-certificates 2>&1)
+if [[ $? -eq 0 ]]; then
     echo "  - Packages installed."
 else
-    echo "  - apt-get failed (likely no root in container), continuing with fallbacks."
+    echo "  - apt-get failed, continuing with fallbacks. Output was:"
+    echo "${APT_OUTPUT}" | sed 's/^/      /'
 fi
 
 SAVE_DIR="/home/container/StarRupture/Saved/SaveGames/${SESSION_NAME}"

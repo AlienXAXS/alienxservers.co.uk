@@ -12,15 +12,26 @@ step() {
 }
 
 echo "Starting server, please wait..."
-step "Installing required packages"
-# Install required packages (jq, unzip, curl). Pterodactyl containers may run
-# unprivileged, so tolerate failure - fallbacks below handle a missing jq.
-APT_OUTPUT=$(apt-get update -qq 2>&1 && apt-get install -y -qq jq unzip curl ca-certificates 2>&1)
-if [[ $? -eq 0 ]]; then
-    echo "  - Packages installed."
+step "Checking required tools"
+# The container runs unprivileged (no apt), so fetch static binaries into
+# /home/container for anything the image doesn't ship. jq is handled in its
+# own step below; busybox provides unzip.
+UNZIP_CMD="unzip"
+if ! command -v unzip &>/dev/null; then
+    if [[ ! -x /home/container/busybox ]]; then
+        echo "unzip not found in image, downloading static busybox..."
+        curl -fsSL -o /home/container/busybox "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+        chmod +x /home/container/busybox 2>/dev/null
+    fi
+    if [[ -x /home/container/busybox ]]; then
+        UNZIP_CMD="/home/container/busybox unzip"
+        echo "Using busybox unzip."
+    else
+        echo "Warning: could not obtain busybox, ModLoader updates will be skipped if unzip is needed."
+        UNZIP_CMD=""
+    fi
 else
-    echo "  - apt-get failed, continuing with fallbacks. Output was:"
-    echo "${APT_OUTPUT}" | sed 's/^/      /'
+    echo "unzip found in image."
 fi
 
 SAVE_DIR="/home/container/StarRupture/Saved/SaveGames/${SESSION_NAME}"
@@ -170,10 +181,10 @@ if [[ -n "${UPDATE_STATE_FILE}" ]]; then
 
                     if [[ -f "${TMP_ZIP}" ]]; then
                         echo "Extracting to /home/container/StarRupture/Binaries/Win64 ..."
-                        if ! command -v unzip &>/dev/null; then
-                            echo "unzip not found, cannot extract ModLoader update. Skipping."
+                        if [[ -z "${UNZIP_CMD}" ]]; then
+                            echo "unzip not available, cannot extract ModLoader update. Skipping."
                         else
-                            unzip -o -q "${TMP_ZIP}" -d "/home/container/StarRupture/Binaries/Win64"
+                            ${UNZIP_CMD} -o -q "${TMP_ZIP}" -d "/home/container/StarRupture/Binaries/Win64"
                             echo "ModLoader update extracted."
                         fi
                         rm -f "${TMP_ZIP}"

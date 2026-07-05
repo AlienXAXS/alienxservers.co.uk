@@ -105,48 +105,60 @@ if [[ -n "${UPDATE_STATE_FILE}" ]]; then
     CURRENT_BUILD_TAG=$(grep -i "^BuildTag" "${UPDATE_STATE_FILE}" | head -n1 | cut -d'=' -f2- | tr -d '[:space:]"')
     echo "Current BuildTag: ${CURRENT_BUILD_TAG}"
 
-    echo "Fetching latest ModLoader manifest..."
-    MANIFEST_JSON=$(curl -s -L "https://github.com/AlienXAXS/StarRupture-ModLoader/releases/download/latest/manifest-server.json")
+    echo "Fetching latest release info from GitHub API..."
+    RELEASE_API_JSON=$(curl -s -L \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/AlienXAXS/StarRupture-ModLoader/releases/latest")
 
-    if [[ -n "${MANIFEST_JSON}" ]]; then
-        LATEST_BUILD_TAG=$(echo "${MANIFEST_JSON}" | /home/container/jq -r '.build_tag')
-        echo "Latest manifest build_tag: ${LATEST_BUILD_TAG}"
+    # Sanity check: did we actually get a release object back?
+    RELEASE_TAG_NAME=$(echo "${RELEASE_API_JSON}" | /home/container/jq -r '.tag_name // empty')
 
-        if [[ -n "${LATEST_BUILD_TAG}" ]] && [[ "${LATEST_BUILD_TAG}" != "null" ]] && [[ "${CURRENT_BUILD_TAG}" != "${LATEST_BUILD_TAG}" ]]; then
-            echo "BuildTag mismatch (installed: ${CURRENT_BUILD_TAG:-none} / latest: ${LATEST_BUILD_TAG}). Updating ModLoader..."
+    if [[ -z "${RELEASE_TAG_NAME}" ]]; then
+        echo "Warning: GitHub API did not return a valid release (rate limited, network issue, or repo/API problem). Skipping ModLoader update check."
+        echo "Raw API response (truncated): $(echo "${RELEASE_API_JSON}" | head -c 300)"
+    else
+        echo "Latest release tag: ${RELEASE_TAG_NAME}"
 
-            RELEASE_API_JSON=$(curl -s -L \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/AlienXAXS/StarRupture-ModLoader/releases/latest")
+        MANIFEST_URL=$(echo "${RELEASE_API_JSON}" | /home/container/jq -r '.assets[] | select(.name | test("manifest-server\\.json$"; "i")) | .browser_download_url' | head -n1)
 
-            ASSET_URL=$(echo "${RELEASE_API_JSON}" | /home/container/jq -r '.assets[] | select(.name | test("Server.*\\.zip$"; "i")) | .browser_download_url' | head -n1)
-            ASSET_NAME=$(echo "${RELEASE_API_JSON}" | /home/container/jq -r '.assets[] | select(.name | test("Server.*\\.zip$"; "i")) | .name' | head -n1)
+        if [[ -z "${MANIFEST_URL}" ]] || [[ "${MANIFEST_URL}" == "null" ]]; then
+            echo "Warning: no manifest-server.json asset found on release ${RELEASE_TAG_NAME}, skipping update check."
+        else
+            echo "Fetching manifest from ${MANIFEST_URL}..."
+            MANIFEST_JSON=$(curl -s -L "${MANIFEST_URL}")
+            LATEST_BUILD_TAG=$(echo "${MANIFEST_JSON}" | /home/container/jq -r '.build_tag // empty')
+            echo "Latest manifest build_tag: ${LATEST_BUILD_TAG}"
 
-            if [[ -n "${ASSET_URL}" ]] && [[ "${ASSET_URL}" != "null" ]]; then
-                echo "Downloading ${ASSET_NAME} from ${ASSET_URL}..."
-                TMP_ZIP="/tmp/${ASSET_NAME}"
-                curl -sL -o "${TMP_ZIP}" "${ASSET_URL}"
+            if [[ -n "${LATEST_BUILD_TAG}" ]] && [[ "${CURRENT_BUILD_TAG}" != "${LATEST_BUILD_TAG}" ]]; then
+                echo "BuildTag mismatch (installed: ${CURRENT_BUILD_TAG:-none} / latest: ${LATEST_BUILD_TAG}). Updating ModLoader..."
 
-                if [[ -f "${TMP_ZIP}" ]]; then
-                    echo "Extracting to /home/container/StarRupture/Binaries/Win64 ..."
-                    if ! command -v unzip &>/dev/null; then
-                        echo "unzip not found, cannot extract ModLoader update. Skipping."
+                ASSET_URL=$(echo "${RELEASE_API_JSON}" | /home/container/jq -r '.assets[] | select(.name | test("Server.*\\.zip$"; "i")) | .browser_download_url' | head -n1)
+                ASSET_NAME=$(echo "${RELEASE_API_JSON}" | /home/container/jq -r '.assets[] | select(.name | test("Server.*\\.zip$"; "i")) | .name' | head -n1)
+
+                if [[ -n "${ASSET_URL}" ]] && [[ "${ASSET_URL}" != "null" ]]; then
+                    echo "Downloading ${ASSET_NAME} from ${ASSET_URL}..."
+                    TMP_ZIP="/tmp/${ASSET_NAME}"
+                    curl -sL -o "${TMP_ZIP}" "${ASSET_URL}"
+
+                    if [[ -f "${TMP_ZIP}" ]]; then
+                        echo "Extracting to /home/container/StarRupture/Binaries/Win64 ..."
+                        if ! command -v unzip &>/dev/null; then
+                            echo "unzip not found, cannot extract ModLoader update. Skipping."
+                        else
+                            unzip -o -q "${TMP_ZIP}" -d "/home/container/StarRupture/Binaries/Win64"
+                            echo "ModLoader update extracted."
+                        fi
+                        rm -f "${TMP_ZIP}"
                     else
-                        unzip -o -q "${TMP_ZIP}" -d "/home/container/StarRupture/Binaries/Win64"
-                        echo "ModLoader update extracted."
+                        echo "Warning: ModLoader Server asset failed to download, skipping update."
                     fi
-                    rm -f "${TMP_ZIP}"
                 else
-                    echo "Warning: ModLoader Server asset failed to download, skipping update."
+                    echo "Warning: could not locate a Server .zip asset on release ${RELEASE_TAG_NAME}, skipping update."
                 fi
             else
-                echo "Warning: could not locate a Server .zip asset on the latest release, skipping update."
+                echo "ModLoader is up to date, no action needed."
             fi
-        else
-            echo "ModLoader is up to date, no action needed."
         fi
-    else
-        echo "Warning: manifest-server.json request returned empty, skipping ModLoader update check."
     fi
 else
     echo "update_state.ini not found in either expected location, skipping ModLoader update check."

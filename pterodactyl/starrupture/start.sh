@@ -1,4 +1,14 @@
 #!/bin/bash
+
+# Install required packages (jq, unzip, curl). Pterodactyl containers may run
+# unprivileged, so tolerate failure - fallbacks below handle a missing jq.
+echo "Installing required packages..."
+if apt-get update -qq 2>/dev/null && apt-get install -y -qq jq unzip curl ca-certificates 2>/dev/null; then
+    echo "  - Packages installed."
+else
+    echo "  - apt-get failed (likely no root in container), continuing with fallbacks."
+fi
+
 SAVE_DIR="/home/container/StarRupture/Saved/SaveGames/${SESSION_NAME}"
 
 if [[ -d "/home/container/steamapps" ]]; then
@@ -81,7 +91,11 @@ if [[ -z "${RCON_PASSWORD}" ]]; then
     echo "No RCON password set, generated random password: ${RCON_PASSWORD}"
 fi
 
-## Ensure jq is available
+## Ensure jq is available (prefer the apt-installed one)
+if command -v jq &>/dev/null && [[ ! -f /home/container/jq ]]; then
+    echo "Using system jq: $(command -v jq)"
+    ln -sf "$(command -v jq)" /home/container/jq
+fi
 if [[ ! -f /home/container/jq ]]; then
     echo "Downloading jq..."
     curl -Lo /home/container/jq https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64
@@ -215,7 +229,14 @@ else
 fi
 
 # Graceful shutdown handler - sends RCON exit command before killing the server
+SR_PID=""
 _shutdown() {
+    # If the server hasn't been launched yet (e.g. signal during wineboot
+    # pre-init), there is nothing to shut down gracefully - just exit.
+    if [[ -z "${SR_PID}" ]]; then
+        echo "Shutdown signal received before server launch, exiting."
+        exit 0
+    fi
     echo "Shutdown signal received, sending RCON exit command..."
     /home/container/rcon -a 127.0.0.1:${RCON_PORT} -p "${RCON_PASSWORD}" "exit" 2>/dev/null
     # Wait up to 15 seconds for the server to exit gracefully

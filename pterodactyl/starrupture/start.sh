@@ -1,8 +1,19 @@
 #!/bin/bash
 
+# Prints a simple banner for each step, with a short pause so the
+# console output is easy to follow.
+step() {
+    sleep 2
+    echo ""
+    echo "========================================="
+    echo "  $1"
+    echo "========================================="
+    sleep 1
+}
+
+step "Installing required packages"
 # Install required packages (jq, unzip, curl). Pterodactyl containers may run
 # unprivileged, so tolerate failure - fallbacks below handle a missing jq.
-echo "Installing required packages..."
 if apt-get update -qq 2>/dev/null && apt-get install -y -qq jq unzip curl ca-certificates 2>/dev/null; then
     echo "  - Packages installed."
 else
@@ -11,12 +22,14 @@ fi
 
 SAVE_DIR="/home/container/StarRupture/Saved/SaveGames/${SESSION_NAME}"
 
+step "Cleaning up Steam leftovers"
 if [[ -d "/home/container/steamapps" ]]; then
     echo "Cleaning up existing Steamapps folder"
     rm -rf /home/container/steamapps
     echo "  - Done"
 fi
 
+step "Checking save files"
 if [[ -d "${SAVE_DIR}" ]]; then
     echo "Existing save directory detected: ${SAVE_DIR}"
     echo "Checking required save files..."
@@ -53,6 +66,7 @@ else
     echo "No existing save directory found for session '${SESSION_NAME}', continuing normally."
 fi
 
+step "Generating DSSettings.txt"
 SETTINGS_FILE="/home/container/DSSettings.txt"
 
 if [[ -f "${SAVE_DIR}/AutoSave0.sav" ]]; then
@@ -79,18 +93,14 @@ echo "DSSettings.txt created at ${SETTINGS_FILE}"
 echo "Contents:"
 cat "${SETTINGS_FILE}"
 
-# Print all environment variables for debugging
-echo "-----------------------------------------"
-echo "Environment Variables:"
-echo "-----------------------------------------"
-env | sort
-echo "-----------------------------------------"
+step "Configuring RCON"
 # If no RCON password is set, generate a random one so RCON always works
 if [[ -z "${RCON_PASSWORD}" ]]; then
     RCON_PASSWORD=$(cat /proc/sys/kernel/random/uuid | tr -d '-' | head -c 24)
     echo "No RCON password set, generated random password: ${RCON_PASSWORD}"
 fi
 
+step "Checking jq"
 ## Ensure jq is available (prefer the apt-installed one)
 if command -v jq &>/dev/null && [[ ! -f /home/container/jq ]]; then
     echo "Using system jq: $(command -v jq)"
@@ -106,6 +116,7 @@ else
 fi
 
 # --- ModLoader update check ---
+step "Checking for ModLoader updates"
 UPDATE_STATE_FILE=""
 if [[ -f "/home/container/StarRupture/Binaries/Win64/update_state.ini" ]]; then
     UPDATE_STATE_FILE="/home/container/StarRupture/Binaries/Win64/update_state.ini"
@@ -177,8 +188,7 @@ if [[ -n "${UPDATE_STATE_FILE}" ]]; then
 else
     echo "update_state.ini not found in either expected location, skipping ModLoader update check."
 fi
-echo "-----------------------------------------"
-
+step "Generating password files"
 ## Generate password files if passwords are set
 if [[ -n "${ADMIN_PASSWORD}" ]] || [[ -n "${PLAYER_PASSWORD}" ]]; then
     echo "At least one password is set, checking for existing files..."
@@ -262,12 +272,13 @@ if [[ -z "${WINEDLLOVERRIDES}" ]]; then
     echo "No WINEDLLOVERRIDES set, using default: ${WINEDLLOVERRIDES}"
 fi
 
-echo "Pre-initialising Proton prefix (this may take 3-5 minutes)..."
+step "Pre-initialising Proton prefix"
+echo "This may take 3-5 minutes..."
 WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" ${LAUNCHER} wineboot --init 2>&1
 echo "Proton prefix ready."
 
 export WINEDLLOVERRIDES
-echo "Launching server..."
+step "Launching server"
 echo "  LAUNCHER:          ${LAUNCHER}"
 echo "  SERVER_PORT:       ${SERVER_PORT}"
 echo "  RCON_PORT:         ${RCON_PORT}"

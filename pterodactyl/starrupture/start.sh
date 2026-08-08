@@ -3,7 +3,6 @@
 # Prints a simple banner for each step, with a short pause so the
 # console output is easy to follow.
 step() {
-    sleep 2
     echo ""
     echo "========================================="
     echo "  $1"

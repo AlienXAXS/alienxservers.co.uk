@@ -285,6 +285,54 @@ if [[ -z "${WINEDLLOVERRIDES}" ]]; then
     echo "No WINEDLLOVERRIDES set, using default: ${WINEDLLOVERRIDES}"
 fi
 
+step "Configuring Proton data directory"
+# Everything Proton/Wine writes is forced under /home/container/.proton so it is
+# visible over SFTP/the file manager. If the prefix goes bad (symptom: proton
+# launches, prints "fsync: up and running" and then hangs forever), delete
+# /home/container/.proton and restart - it will be rebuilt from scratch.
+PROTON_DATA_DIR="/home/container/.proton"
+
+# Optional escape hatch: set WIPE_PROTON_PREFIX to 1/true/yes to nuke the
+# prefix on the next boot without needing file access.
+if [[ "${WIPE_PROTON_PREFIX,,}" =~ ^(1|true|yes)$ ]]; then
+    echo "WIPE_PROTON_PREFIX is set, removing ${PROTON_DATA_DIR}..."
+    rm -rf "${PROTON_DATA_DIR}"
+    echo "  - Done, prefix will be rebuilt."
+fi
+
+mkdir -p "${PROTON_DATA_DIR}/compatdata" \
+         "${PROTON_DATA_DIR}/steam" \
+         "${PROTON_DATA_DIR}/cache" \
+         "${PROTON_DATA_DIR}/xdg/data" \
+         "${PROTON_DATA_DIR}/xdg/config" \
+         "${PROTON_DATA_DIR}/xdg/cache"
+
+# Proton itself: compatdata holds the wine prefix (compatdata/pfx)
+export STEAM_COMPAT_DATA_PATH="${PROTON_DATA_DIR}/compatdata"
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="${PROTON_DATA_DIR}/steam"
+export WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx"
+
+# protonfixes / umu / wine all follow the XDG dirs for their state and caches,
+# which otherwise scatter across ~/.local, ~/.config and ~/.cache.
+export XDG_DATA_HOME="${PROTON_DATA_DIR}/xdg/data"
+export XDG_CONFIG_HOME="${PROTON_DATA_DIR}/xdg/config"
+export XDG_CACHE_HOME="${PROTON_DATA_DIR}/xdg/cache"
+
+# Shader caches (harmless on a headless server, but keeps them out of $HOME)
+export DXVK_STATE_CACHE_PATH="${PROTON_DATA_DIR}/cache"
+export __GL_SHADER_DISK_CACHE_PATH="${PROTON_DATA_DIR}/cache"
+export MESA_SHADER_CACHE_DIR="${PROTON_DATA_DIR}/cache"
+
+echo "Proton data directory: ${PROTON_DATA_DIR}"
+echo "  STEAM_COMPAT_DATA_PATH:           ${STEAM_COMPAT_DATA_PATH}"
+echo "  STEAM_COMPAT_CLIENT_INSTALL_PATH: ${STEAM_COMPAT_CLIENT_INSTALL_PATH}"
+echo "  WINEPREFIX:                       ${WINEPREFIX}"
+if [[ -d "${WINEPREFIX}" ]]; then
+    echo "Existing Proton prefix found, reusing it."
+else
+    echo "No Proton prefix yet, a fresh one will be created."
+fi
+
 step "Pre-initialising Proton prefix"
 echo "This may take 3-5 minutes..."
 WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" ${LAUNCHER} wineboot --init 2>&1
@@ -298,6 +346,7 @@ echo "  RCON_PORT:         ${RCON_PORT}"
 echo "  SESSION_NAME:      ${SESSION_NAME}"
 echo "  SAVE_INTERVAL:     ${SAVE_INTERVAL}"
 echo "  WINEDLLOVERRIDES:  ${WINEDLLOVERRIDES}"
+echo "  PROTON_DATA_DIR:   ${PROTON_DATA_DIR}"
 echo "-----------------------------------------"
 WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" ${LAUNCHER} /home/container/StarRupture/Binaries/Win64/StarRuptureServerEOS-Win64-Shipping.exe \
     -Log \

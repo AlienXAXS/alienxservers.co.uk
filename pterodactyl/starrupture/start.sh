@@ -503,24 +503,42 @@ echo "  SESSION_NAME:      ${SESSION_NAME}"
 echo "  SAVE_INTERVAL:     ${SAVE_INTERVAL}"
 echo "  WINEDLLOVERRIDES:  ${WINEDLLOVERRIDES}"
 echo "  PROTON_DATA_DIR:   ${PROTON_DATA_DIR}"
+
+SERVER_EXE="/home/container/StarRupture/Binaries/Win64/StarRuptureServerEOS-Win64-Shipping.exe"
+if [[ ! -f "${SERVER_EXE}" ]]; then
+    echo "FATAL: server executable not found at ${SERVER_EXE}"
+    echo "Contents of Binaries/Win64:"
+    ls -la /home/container/StarRupture/Binaries/Win64 2>&1 | head -40
+    exit 1
+fi
+echo "  SERVER_EXE:        ${SERVER_EXE} ($(stat -c %s "${SERVER_EXE}" 2>/dev/null) bytes)"
 echo "-----------------------------------------"
-WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" ${LAUNCHER} /home/container/StarRupture/Binaries/Win64/StarRuptureServerEOS-Win64-Shipping.exe \
+
+# Keep a copy of everything the launcher prints. Proton/wine errors often
+# arrive in a burst right before an early exit and scroll past in the console.
+LAUNCH_LOG="${PROTON_DATA_DIR}/logs/launch-output.log"
+: > "${LAUNCH_LOG}"
+
+WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" ${LAUNCHER} "${SERVER_EXE}" \
     -Log \
     -Port=${SERVER_PORT} \
     -RconPort=${RCON_PORT} \
     -RconPassword="${RCON_PASSWORD}" \
     -SessionName="${SESSION_NAME}" \
-    -SaveGameInterval=${SAVE_INTERVAL} "${DEBUG_ARGS[@]}" 2>&1 &
+    -SaveGameInterval=${SAVE_INTERVAL} "${DEBUG_ARGS[@]}" \
+    > >(tee -a "${LAUNCH_LOG}") 2>&1 &
 SR_PID=$!
 echo "Server started with PID ${SR_PID}, waiting for log file..."
 # Wait for the log file to appear (up to 5 minutes)
 LOG_FILE="/home/container/StarRupture/Saved/Logs/StarRupture.log"
 WAIT=0
 echo "Waiting for log file..."
+EXITED_EARLY="false"
 until [[ -f "${LOG_FILE}" ]] || [[ ${WAIT} -ge 300 ]]; do
     # If proton exited on its own there is no point waiting out the full 300s.
     if ! kill -0 "${SR_PID}" 2>/dev/null; then
         echo "Launcher process exited after ${WAIT}s without producing a log file."
+        EXITED_EARLY="true"
         break
     fi
     sleep 1
@@ -541,8 +559,45 @@ if [[ -f "${LOG_FILE}" ]]; then
     echo "Log file found, tailing..."
     tail -c0 -F "${LOG_FILE}" --pid=$SR_PID \
         | grep -v -E "LogCore: Warning|LogUObjectBase: Error"
+elif [[ "${EXITED_EARLY}" == "true" ]]; then
+    echo "Launcher already exited, collecting exit status..."
 else
     echo "Log file never appeared after 300s, falling back to waiting on process..."
 fi
 wait ${SR_PID}
-echo "Server process exited."
+SR_RC=$?
+
+echo ""
+echo "========================================="
+echo "  Server process exited with code ${SR_RC}"
+echo "========================================="
+# Exit codes above 128 are "killed by signal N" where N = code - 128.
+if (( SR_RC > 128 )); then
+    SIG=$(( SR_RC - 128 ))
+    echo "That is signal ${SIG}$(kill -l "${SIG}" 2>/dev/null | sed 's/^/ (SIG/;s/$/)/')"
+    case ${SIG} in
+        9)  echo "SIGKILL - almost always the container running out of memory."
+            echo "Check the server's memory limit; Unreal dedicated servers are hungry." ;;
+        11) echo "SIGSEGV - the process crashed." ;;
+        6)  echo "SIGABRT - the process aborted (assertion or unhandled exception)." ;;
+        15) echo "SIGTERM - something asked it to stop." ;;
+    esac
+fi
+
+if [[ ! -f "${LOG_FILE}" ]]; then
+    echo ""
+    echo "No Unreal log was ever written. Captured launcher output was:"
+    echo "-----------------------------------------"
+    if [[ -s "${LAUNCH_LOG}" ]]; then
+        tail -n 60 "${LAUNCH_LOG}"
+    else
+        echo "(the launcher produced no output at all)"
+    fi
+    echo "-----------------------------------------"
+    echo "Saved directory contents:"
+    ls -la /home/container/StarRupture/Saved 2>&1 | head -20
+    if [[ -d "${PROTON_LOG_DIR}" ]]; then
+        echo "Proton logs in ${PROTON_LOG_DIR}:"
+        ls -la "${PROTON_LOG_DIR}" 2>&1 | head -20
+    fi
+fi

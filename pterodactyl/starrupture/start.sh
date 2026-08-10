@@ -326,6 +326,61 @@ if [[ -z "${WINEDLLOVERRIDES}" ]]; then
     echo "No WINEDLLOVERRIDES set, using default: ${WINEDLLOVERRIDES}"
 fi
 
+step "Checking ModLoader"
+# The ModLoader ships as a dwmapi.dll proxy next to the server exe, so it is
+# loaded by the Windows loader before any Unreal code runs. That makes it the
+# first thing to rule out when the server starts but never writes a log line.
+# Set DISABLE_MODLOADER=1 to move the DLL aside and boot vanilla.
+MODLOADER_DLL="/home/container/StarRupture/Binaries/Win64/dwmapi.dll"
+
+# Removes any dwmapi entry from a WINEDLLOVERRIDES string. Entries are
+# semicolon separated ("mscoree,mshtml=;dwmapi=n,b") and the key list is
+# everything left of the '='.
+strip_dwmapi_override() {
+    local out="" entry
+    local IFS=';'
+    for entry in $1; do
+        [[ -z "${entry}" ]] && continue
+        case "${entry%%=*}" in
+            *dwmapi*) continue ;;
+        esac
+        out="${out:+${out};}${entry}"
+    done
+    printf '%s' "${out}"
+}
+
+if [[ "${DISABLE_MODLOADER,,}" =~ ^(1|true|yes)$ ]]; then
+    echo "DISABLE_MODLOADER is set - starting VANILLA (no mods will load)."
+    if [[ -f "${MODLOADER_DLL}" ]]; then
+        mv -f "${MODLOADER_DLL}" "${MODLOADER_DLL}.disabled"
+        echo "  - Moved dwmapi.dll aside to dwmapi.dll.disabled"
+    else
+        echo "  - No dwmapi.dll present, nothing to move."
+    fi
+    WINEDLLOVERRIDES="$(strip_dwmapi_override "${WINEDLLOVERRIDES}")"
+    echo "  - WINEDLLOVERRIDES is now: ${WINEDLLOVERRIDES:-<empty>}"
+else
+    # Restore a previously disabled DLL so unsetting the variable is enough
+    # to get the ModLoader back.
+    if [[ -f "${MODLOADER_DLL}.disabled" ]] && [[ ! -f "${MODLOADER_DLL}" ]]; then
+        mv -f "${MODLOADER_DLL}.disabled" "${MODLOADER_DLL}"
+        echo "ModLoader was previously disabled, dwmapi.dll restored."
+    fi
+
+    if [[ -f "${MODLOADER_DLL}" ]]; then
+        echo "ModLoader present: $(ls -la "${MODLOADER_DLL}" | awk '{print $5" bytes, "$6" "$7" "$8}')"
+        # Without a native override wine loads its own builtin dwmapi and the
+        # proxy is silently ignored - the server boots with no mods at all.
+        if [[ ";${WINEDLLOVERRIDES};" != *"dwmapi"* ]]; then
+            echo "WARNING: WINEDLLOVERRIDES does not mention dwmapi."
+            echo "         Wine will load its builtin dwmapi and the ModLoader will NOT load."
+            echo "         Add 'dwmapi=n,b' to the WINEDLLOVERRIDES startup variable if mods are wanted."
+        fi
+    else
+        echo "No dwmapi.dll found, server will run without the ModLoader."
+    fi
+fi
+
 step "Configuring Proton data directory"
 # Everything Proton/Wine writes is forced under /home/container/.proton so it is
 # visible over SFTP/the file manager. If the prefix goes bad (symptom: proton

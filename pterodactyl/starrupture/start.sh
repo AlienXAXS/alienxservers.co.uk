@@ -224,8 +224,19 @@ if [[ -n "${UPDATE_STATE_FILE}" ]]; then
                         if [[ -z "${UNZIP_CMD}" ]]; then
                             echo "unzip not available, cannot extract ModLoader update. Skipping."
                         else
-                            ${UNZIP_CMD} -o -q "${TMP_ZIP}" -d "/home/container/StarRupture/Binaries/Win64"
-                            echo "ModLoader update extracted."
+                            # This extracts over the same directory the game
+                            # executable lives in, so log exactly what is about
+                            # to be written and refuse to overwrite the server
+                            # binary itself.
+                            echo "Archive contents:"
+                            ${UNZIP_CMD} -l "${TMP_ZIP}" 2>&1 | head -40
+                            if ${UNZIP_CMD} -l "${TMP_ZIP}" 2>/dev/null | grep -qi "StarRuptureServerEOS-Win64-Shipping.exe"; then
+                                echo "REFUSING to extract: this archive contains the server executable."
+                                echo "Extracting it would overwrite the game binary. Skipping ModLoader update."
+                            else
+                                ${UNZIP_CMD} -o -q "${TMP_ZIP}" -d "/home/container/StarRupture/Binaries/Win64"
+                                echo "ModLoader update extracted."
+                            fi
                         fi
                         rm -f "${TMP_ZIP}"
                     else
@@ -507,11 +518,40 @@ echo "  PROTON_DATA_DIR:   ${PROTON_DATA_DIR}"
 SERVER_EXE="/home/container/StarRupture/Binaries/Win64/StarRuptureServerEOS-Win64-Shipping.exe"
 if [[ ! -f "${SERVER_EXE}" ]]; then
     echo "FATAL: server executable not found at ${SERVER_EXE}"
+    echo "The rest of the install may still be intact - this usually means a"
+    echo "SteamCMD update was interrupted part way through writing the binary,"
+    echo "or the server ran out of disk. Reinstall from the panel to restore it."
     echo "Contents of Binaries/Win64:"
     ls -la /home/container/StarRupture/Binaries/Win64 2>&1 | head -40
+    echo "Disk usage:"
+    du -sh /home/container 2>/dev/null
+    df -h /home/container 2>/dev/null
     exit 1
 fi
-echo "  SERVER_EXE:        ${SERVER_EXE} ($(stat -c %s "${SERVER_EXE}" 2>/dev/null) bytes)"
+
+EXE_SIZE="$(stat -c %s "${SERVER_EXE}" 2>/dev/null)"
+echo "  SERVER_EXE:        ${SERVER_EXE} (${EXE_SIZE} bytes)"
+# A truncated binary is worse than a missing one - it starts and dies with no
+# useful output. A shipping UE server build is tens of MB.
+if [[ -n "${EXE_SIZE}" ]] && (( EXE_SIZE < 1000000 )); then
+    echo "WARNING: the server executable is suspiciously small (${EXE_SIZE} bytes)."
+    echo "         It is very likely truncated or corrupt - consider a reinstall."
+fi
+
+# Remember the binary between boots. If it silently changes or disappears
+# again we will know which boot it happened on, and whether it coincided with
+# a ModLoader update.
+EXE_STATE_FILE="/home/container/.starrupture_exe_state"
+EXE_FINGERPRINT="$(stat -c '%s bytes, mtime %Y' "${SERVER_EXE}" 2>/dev/null)"
+if [[ -f "${EXE_STATE_FILE}" ]]; then
+    PREV_FINGERPRINT="$(cat "${EXE_STATE_FILE}" 2>/dev/null)"
+    if [[ "${PREV_FINGERPRINT}" != "${EXE_FINGERPRINT}" ]]; then
+        echo "  NOTE: the server executable changed since the last boot."
+        echo "        was: ${PREV_FINGERPRINT}"
+        echo "        now: ${EXE_FINGERPRINT}"
+    fi
+fi
+printf '%s' "${EXE_FINGERPRINT}" > "${EXE_STATE_FILE}"
 echo "-----------------------------------------"
 
 # Keep a copy of everything the launcher prints. Proton/wine errors often

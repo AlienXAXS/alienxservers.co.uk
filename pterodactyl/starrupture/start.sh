@@ -10,6 +10,47 @@ step() {
     sleep 1
 }
 
+# Dumps the current process tree with kernel wait-channel and state columns.
+# Used whenever something looks hung - the STAT and WCHAN columns tell us
+# whether a process is running, sleeping on the network, stopped, or a zombie.
+dump_state() {
+    echo "----- process state ($(date -u '+%H:%M:%S') UTC) -----"
+    # 'time' is accumulated CPU time: a hung process showing 00:00:00 is
+    # blocked on something, one climbing steadily is spinning in a loop.
+    if command -v ps &>/dev/null; then
+        ps -eo pid,ppid,stat,etime,time,wchan:22,args 2>/dev/null \
+            || ps -eo pid,ppid,stat,etime,time,args 2>/dev/null \
+            || ps aux
+    else
+        # Minimal images sometimes ship no ps at all - read /proc directly.
+        for p in /proc/[0-9]*; do
+            [[ -r "${p}/stat" ]] || continue
+            printf '%-8s %-8s %s\n' \
+                "${p##*/}" \
+                "$(cat "${p}/wchan" 2>/dev/null)" \
+                "$(tr '\0' ' ' < "${p}/cmdline" 2>/dev/null)"
+        done
+    fi
+    echo "-------------------------------------------"
+}
+
+# Kills any wine/proton processes left behind by a previous attempt. A stuck
+# wineserver will make every later launch hang, so this runs before retries.
+kill_wine() {
+    if command -v pkill &>/dev/null; then
+        pkill -9 -f 'wineserver|wine64|wine-preloader|services.exe' 2>/dev/null
+    else
+        for p in /proc/[0-9]*; do
+            [[ -r "${p}/cmdline" ]] || continue
+            case "$(tr '\0' ' ' < "${p}/cmdline" 2>/dev/null)" in
+                *wineserver*|*wine-preloader*|*services.exe*)
+                    kill -9 "${p##*/}" 2>/dev/null ;;
+            esac
+        done
+    fi
+    sleep 2
+}
+
 echo "Starting server, please wait..."
 step "Checking required tools"
 # The container runs unprivileged (no apt), so fetch static binaries into
@@ -335,10 +376,70 @@ fi
 
 step "Pre-initialising Proton prefix"
 echo "This may take 3-5 minutes..."
-WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" ${LAUNCHER} wineboot --init 2>&1
+
+# wineboot has no business taking longer than this. If it does, the prefix
+# creation has deadlocked (usually a stuck wineserver or services.exe) - kill
+# the leftovers and try once more rather than hanging the container forever.
+WINEBOOT_TIMEOUT="${WINEBOOT_TIMEOUT:-600}"
+WINEBOOT_OK="false"
+for ATTEMPT in 1 2; do
+    echo "wineboot attempt ${ATTEMPT}/2 (timeout ${WINEBOOT_TIMEOUT}s), started $(date -u '+%H:%M:%S') UTC"
+    if command -v timeout &>/dev/null; then
+        WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" \
+            timeout --signal=KILL "${WINEBOOT_TIMEOUT}" ${LAUNCHER} wineboot --init 2>&1
+        RC=$?
+    else
+        echo "Note: 'timeout' not available in image, running without a time limit."
+        WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" ${LAUNCHER} wineboot --init 2>&1
+        RC=$?
+    fi
+
+    if [[ ${RC} -eq 137 ]] || [[ ${RC} -eq 124 ]]; then
+        echo "!!! wineboot did NOT finish within ${WINEBOOT_TIMEOUT}s - the prefix init is hung."
+        dump_state
+        echo "Killing leftover wine processes before retrying..."
+        kill_wine
+        continue
+    fi
+
+    echo "wineboot exited with code ${RC} after $(date -u '+%H:%M:%S') UTC"
+    WINEBOOT_OK="true"
+    break
+done
+
+if [[ "${WINEBOOT_OK}" != "true" ]]; then
+    echo "Proton prefix could not be initialised after 2 attempts."
+    echo "Delete /home/container/.proton (or set WIPE_PROTON_PREFIX=1) and try again."
+    echo "If it keeps happening, the container is likely unable to complete wine's"
+    echo "first-run setup - the process dumps above show where it stalled."
+    exit 1
+fi
 echo "Proton prefix ready."
 
 export WINEDLLOVERRIDES
+
+# --- Debug mode -------------------------------------------------------------
+# Set PROTON_DEBUG=1 as a startup variable to capture why the server never
+# reaches its first log line. Adds a full wine trace under
+# /home/container/.proton/logs and forces Unreal to log to stdout, so output
+# appears in the console even when Saved/Logs is never written.
+DEBUG_ARGS=()
+export PROTON_LOG_DIR="${PROTON_DATA_DIR}/logs"
+mkdir -p "${PROTON_LOG_DIR}"
+if [[ "${PROTON_DEBUG,,}" =~ ^(1|true|yes)$ ]]; then
+    echo "PROTON_DEBUG enabled - verbose wine logging is ON (slower startup)."
+    export PROTON_LOG=1
+    # +loaddll shows every DLL wine resolves, which is how a missing or broken
+    # dependency shows up. Deliberately NOT +relay - that is unusably slow.
+    export WINEDEBUG="${WINEDEBUG:-+loaddll,+seh,+tid,+msgbox}"
+    # -unattended stops Unreal blocking on any modal dialog, -stdout sends the
+    # log to the console instead of only to Saved/Logs.
+    DEBUG_ARGS=(-unattended -nosplash -stdout -FullStdOutLogOutput)
+    echo "  PROTON_LOG_DIR: ${PROTON_LOG_DIR}"
+    echo "  WINEDEBUG:      ${WINEDEBUG}"
+    echo "  Extra args:     ${DEBUG_ARGS[*]}"
+fi
+
 step "Launching server"
 echo "  LAUNCHER:          ${LAUNCHER}"
 echo "  SERVER_PORT:       ${SERVER_PORT}"
@@ -354,7 +455,7 @@ WINEDLLOVERRIDES="${WINEDLLOVERRIDES}" ${LAUNCHER} /home/container/StarRupture/B
     -RconPort=${RCON_PORT} \
     -RconPassword="${RCON_PASSWORD}" \
     -SessionName="${SESSION_NAME}" \
-    -SaveGameInterval=${SAVE_INTERVAL} 2>&1 &
+    -SaveGameInterval=${SAVE_INTERVAL} "${DEBUG_ARGS[@]}" 2>&1 &
 SR_PID=$!
 echo "Server started with PID ${SR_PID}, waiting for log file..."
 # Wait for the log file to appear (up to 5 minutes)
@@ -362,8 +463,24 @@ LOG_FILE="/home/container/StarRupture/Saved/Logs/StarRupture.log"
 WAIT=0
 echo "Waiting for log file..."
 until [[ -f "${LOG_FILE}" ]] || [[ ${WAIT} -ge 300 ]]; do
+    # If proton exited on its own there is no point waiting out the full 300s.
+    if ! kill -0 "${SR_PID}" 2>/dev/null; then
+        echo "Launcher process exited after ${WAIT}s without producing a log file."
+        break
+    fi
     sleep 1
     WAIT=$((WAIT + 1))
+    # Heartbeat so a hang is obvious in the console, with a process dump at
+    # 60s and 180s showing exactly what the server is blocked on.
+    if (( WAIT % 30 == 0 )); then
+        echo "  ...still waiting for ${LOG_FILE} (${WAIT}s elapsed)"
+    fi
+    if (( WAIT == 60 || WAIT == 180 )); then
+        echo "No log file after ${WAIT}s - dumping process state:"
+        dump_state
+        echo "Contents of Saved/Logs:"
+        ls -la /home/container/StarRupture/Saved/Logs 2>&1 | head -20
+    fi
 done
 if [[ -f "${LOG_FILE}" ]]; then
     echo "Log file found, tailing..."

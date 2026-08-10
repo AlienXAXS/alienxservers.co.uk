@@ -341,8 +341,18 @@ step "Checking ModLoader"
 # The ModLoader ships as a dwmapi.dll proxy next to the server exe, so it is
 # loaded by the Windows loader before any Unreal code runs. That makes it the
 # first thing to rule out when the server starts but never writes a log line.
-# Set DISABLE_MODLOADER=1 to move the DLL aside and boot vanilla.
+# Set DISABLE_MODLOADER=1 to boot vanilla: dropping the dwmapi override is
+# enough, because wine then loads its own builtin dwmapi and the proxy sitting
+# next to the exe is simply never used. The file is left untouched.
 MODLOADER_DLL="/home/container/StarRupture/Binaries/Win64/dwmapi.dll"
+
+# One-time cleanup: an earlier version of this script disabled the ModLoader by
+# renaming the DLL. Put it back so nobody is left with a permanently disabled
+# ModLoader after upgrading the script.
+if [[ -f "${MODLOADER_DLL}.disabled" ]] && [[ ! -f "${MODLOADER_DLL}" ]]; then
+    mv -f "${MODLOADER_DLL}.disabled" "${MODLOADER_DLL}"
+    echo "Restored dwmapi.dll that an older version of this script had renamed."
+fi
 
 # Removes any dwmapi entry from a WINEDLLOVERRIDES string. Entries are
 # semicolon separated ("mscoree,mshtml=;dwmapi=n,b") and the key list is
@@ -362,22 +372,11 @@ strip_dwmapi_override() {
 
 if [[ "${DISABLE_MODLOADER,,}" =~ ^(1|true|yes)$ ]]; then
     echo "DISABLE_MODLOADER is set - starting VANILLA (no mods will load)."
-    if [[ -f "${MODLOADER_DLL}" ]]; then
-        mv -f "${MODLOADER_DLL}" "${MODLOADER_DLL}.disabled"
-        echo "  - Moved dwmapi.dll aside to dwmapi.dll.disabled"
-    else
-        echo "  - No dwmapi.dll present, nothing to move."
-    fi
     WINEDLLOVERRIDES="$(strip_dwmapi_override "${WINEDLLOVERRIDES}")"
+    echo "  - dwmapi override removed, wine will use its builtin dwmapi."
+    echo "  - dwmapi.dll is left in place, it just never gets loaded."
     echo "  - WINEDLLOVERRIDES is now: ${WINEDLLOVERRIDES:-<empty>}"
 else
-    # Restore a previously disabled DLL so unsetting the variable is enough
-    # to get the ModLoader back.
-    if [[ -f "${MODLOADER_DLL}.disabled" ]] && [[ ! -f "${MODLOADER_DLL}" ]]; then
-        mv -f "${MODLOADER_DLL}.disabled" "${MODLOADER_DLL}"
-        echo "ModLoader was previously disabled, dwmapi.dll restored."
-    fi
-
     if [[ -f "${MODLOADER_DLL}" ]]; then
         echo "ModLoader present: $(ls -la "${MODLOADER_DLL}" | awk '{print $5" bytes, "$6" "$7" "$8}')"
         # Without a native override wine loads its own builtin dwmapi and the

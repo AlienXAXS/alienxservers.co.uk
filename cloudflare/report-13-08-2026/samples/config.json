@@ -1,0 +1,56 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1234,
+      "users": [
+        {
+          "uuid": "2c11bde0-fa06-4438-9ff0-f8502faf6aa3"
+        }
+      ],
+      "transport": {
+        "type": "ws",
+        "path": "/"
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vless-reality-in",
+      "listen": "::",
+      "listen_port": 10016,
+      "users": [
+        {
+          "uuid": "2c11bde0-fa06-4438-9ff0-f8502faf6aa3",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "itunes.apple.com",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "itunes.apple.com",
+            "server_port": 443
+          },
+          "private_key": "WM8nHADnPUrHzFDDyPv2GpKk9BxOAt_7JhdtpgPjGkc",
+          "short_id": [
+            "d251bcb464734a18"
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}
